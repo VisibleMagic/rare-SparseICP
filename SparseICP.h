@@ -17,8 +17,13 @@
 #ifndef ICP_H
 #define ICP_H
 #include <nanoflann.hpp>
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdocumentation"
 #include <Eigen/Dense>
-///////////////////////////////////////////////////////////////////////////////
+
+#include <iostream>
+/////////////§//////////////////////////////////////////////////////////////////
 namespace nanoflann {
     /// KD-tree adaptor for working with data directly stored in an Eigen Matrix, without duplicating the data storage.
     /// This code is adapted from the KDTreeEigenMatrixAdaptor class of nanoflann.hpp
@@ -31,7 +36,7 @@ namespace nanoflann {
         index_t* index;
         KDTreeAdaptor(const MatrixType &mat, const int leaf_max_size = 10) : m_data_matrix(mat) {
             const size_t dims = mat.rows();
-            index = new index_t( dims, *this, nanoflann::KDTreeSingleIndexAdaptorParams(leaf_max_size, dims ) );
+            index = new index_t( dims, *this, nanoflann::KDTreeSingleIndexAdaptorParams(leaf_max_size ) );
             index->buildIndex();
         }
         ~KDTreeAdaptor() {delete index;}
@@ -135,6 +140,17 @@ namespace RigidMotionEstimator {
         Eigen::Vector3d X_mean;
         for(int i=0; i<3; ++i)
             X_mean(i) = (X.row(i).array()*w_normalized.transpose().array()).sum();
+        
+        
+        Eigen::Affine3d preTransform;
+        {
+            preTransform.setIdentity();
+            
+            preTransform.translation().x() = -X_mean.x();
+            preTransform.translation().y() = -X_mean.y();
+            preTransform.translation().z() = -X_mean.z();
+        }
+        
         X.colwise() -= X_mean;
         Y.colwise() -= X_mean;
         /// Prepare LHS and RHS
@@ -144,21 +160,21 @@ namespace RigidMotionEstimator {
         Block33 TR = LHS.topRightCorner<3,3>();
         Block33 BR = LHS.bottomRightCorner<3,3>();
         Eigen::MatrixXd C = Eigen::MatrixXd::Zero(3,X.cols());
-        #pragma omp parallel
+#pragma omp parallel
         {
-            #pragma omp for
+#pragma omp for
             for(int i=0; i<X.cols(); i++) {
                 C.col(i) = X.col(i).cross(N.col(i));
             }
-            #pragma omp sections nowait
+#pragma omp sections nowait
             {
-                #pragma omp section
+#pragma omp section
                 for(int i=0; i<X.cols(); i++) TL.selfadjointView<Eigen::Upper>().rankUpdate(C.col(i), w(i));
-                #pragma omp section
+#pragma omp section
                 for(int i=0; i<X.cols(); i++) TR += (C.col(i)*N.col(i).transpose())*w(i);
-                #pragma omp section
+#pragma omp section
                 for(int i=0; i<X.cols(); i++) BR.selfadjointView<Eigen::Upper>().rankUpdate(N.col(i), w(i));
-                #pragma omp section
+#pragma omp section
                 for(int i=0; i<C.cols(); i++) {
                     double dist_to_plane = -((X.col(i) - Y.col(i)).dot(N.col(i)) - u(i))*w(i);
                     RHS.head<3>() += C.col(i)*dist_to_plane;
@@ -168,20 +184,31 @@ namespace RigidMotionEstimator {
         }
         LHS = LHS.selfadjointView<Eigen::Upper>();
         /// Compute transformation
-        Eigen::Affine3d transformation;
+            Eigen::Affine3d transformation;
         Eigen::LDLT<Matrix66> ldlt(LHS);
         RHS = ldlt.solve(RHS);
         transformation  = Eigen::AngleAxisd(RHS(0), Eigen::Vector3d::UnitX()) *
-                          Eigen::AngleAxisd(RHS(1), Eigen::Vector3d::UnitY()) *
-                          Eigen::AngleAxisd(RHS(2), Eigen::Vector3d::UnitZ());
+        Eigen::AngleAxisd(RHS(1), Eigen::Vector3d::UnitY()) *
+        Eigen::AngleAxisd(RHS(2), Eigen::Vector3d::UnitZ());
         transformation.translation() = RHS.tail<3>();
         /// Apply transformation
         X = transformation*X;
         /// Re-apply mean
         X.colwise() += X_mean;
         Y.colwise() += X_mean;
+        
+        
+        Eigen::Affine3d postTransform;
+        {
+            postTransform.setIdentity();
+            
+            postTransform.translation().x() = +X_mean.x();
+            postTransform.translation().y() = +X_mean.y();
+            postTransform.translation().z() = +X_mean.z();
+        }
+        
         /// Return transformation
-        return transformation;
+        return postTransform * transformation * preTransform;
     }
     /// @param Source (one 3D point per column)
     /// @param Target (one 3D point per column)
@@ -208,7 +235,7 @@ namespace SICP {
         int max_outer = 100;      /// max outer iteration
         int max_inner = 1;        /// max inner iteration. If max_inner=1 then ADMM else ALM
         double stop = 1e-5;       /// stopping criteria
-        bool print_icpn = false;  /// (debug) print ICP iteration 
+        bool print_icpn = false;  /// (debug) print ICP iteration
     };
     /// Shrinkage operator (Automatic loop unrolling using template)
     template<unsigned int I>
@@ -222,7 +249,7 @@ namespace SICP {
     inline void shrink(Eigen::Matrix3Xd& Q, double mu, double p) {
         double Ba = std::pow((2.0/mu)*(1.0-p), 1.0/(2.0-p));
         double ha = Ba + (p/mu)*std::pow(Ba, p-1.0);
-        #pragma omp parallel for
+#pragma omp parallel for
         for(int i=0; i<Q.cols(); ++i) {
             double n = Q.col(i).norm();
             double w = 0.0;
@@ -235,7 +262,7 @@ namespace SICP {
     inline void shrink(Eigen::VectorXd& y, double mu, double p) {
         double Ba = std::pow((2.0/mu)*(1.0-p), 1.0/(2.0-p));
         double ha = Ba + (p/mu)*std::pow(Ba, p-1.0);
-        #pragma omp parallel for
+#pragma omp parallel for
         for(int i=0; i<y.rows(); ++i) {
             double n = std::abs(y(i));
             double s = 0.0;
@@ -263,7 +290,7 @@ namespace SICP {
         for(int icp=0; icp<par.max_icp; ++icp) {
             if(par.print_icpn) std::cout << "Iteration #" << icp << "/" << par.max_icp << std::endl;
             /// Find closest point
-            #pragma omp parallel for
+#pragma omp parallel for
             for(int i=0; i<X.cols(); ++i) {
                 Q.col(i) = Y.col(kdtree.closest(X.col(i).data()));
             }
@@ -304,10 +331,14 @@ namespace SICP {
     /// @param Target normals (one 3D normal per column)
     /// @param Parameters
     template <typename Derived1, typename Derived2, typename Derived3>
-    void point_to_plane(Eigen::MatrixBase<Derived1>& X,
+    Eigen::Affine3d  point_to_plane(Eigen::MatrixBase<Derived1>& X,
                         Eigen::MatrixBase<Derived2>& Y,
                         Eigen::MatrixBase<Derived3>& N,
                         Parameters par = Parameters()) {
+        
+        Eigen::Affine3d totalTransform;
+        totalTransform.setIdentity();
+
         /// Build kd-tree
         nanoflann::KDTreeAdaptor<Eigen::MatrixBase<Derived2>, 3, nanoflann::metric_L2_Simple> kdtree(Y);
         /// Buffers
@@ -322,7 +353,7 @@ namespace SICP {
             if(par.print_icpn) std::cout << "Iteration #" << icp << "/" << par.max_icp << std::endl;
             
             /// Find closest point
-            #pragma omp parallel for
+#pragma omp parallel for
             for(int i=0; i<X.cols(); ++i) {
                 int id = kdtree.closest(X.col(i).data());
                 Qp.col(i) = Y.col(id);
@@ -338,14 +369,17 @@ namespace SICP {
                     shrink<3>(Z, mu, par.p);
                     /// Rotation and translation update
                     Eigen::VectorXd U = Z-C/mu;
-                    RigidMotionEstimator::point_to_plane(X, Qp, Qn, Eigen::VectorXd::Ones(X.cols()), U);
+                    Eigen::Affine3d transform = RigidMotionEstimator::point_to_plane(X, Qp, Qn, Eigen::VectorXd::Ones(X.cols()), U);
+                    
+                    totalTransform = transform * totalTransform;
+                    
                     /// Stopping criteria
                     dual = (X-Xo1).colwise().norm().maxCoeff();
                     Xo1 = X;
                     if(dual < par.stop) break;
                 }
                 /// C update (lagrange multipliers)
-                Eigen::VectorXf P = (Qn.array()*(X-Qp).array()).colwise().sum().transpose()-Z.array();
+                Eigen::VectorXd P = (Qn.array()*(X-Qp).array()).colwise().sum().transpose()-Z.array();
                 if(!par.use_penalty) C.noalias() += mu*P;
                 /// mu update (penalty)
                 if(mu < par.max_mu) mu *= par.alpha;
@@ -358,6 +392,7 @@ namespace SICP {
             Xo2 = X;
             if(stop < par.stop) break;
         }
+        return totalTransform;
     }
 }
 ///////////////////////////////////////////////////////////////////////////////
@@ -374,10 +409,10 @@ namespace ICP {
     class Parameters {
     public:
         Parameters() : f(NONE),
-                       p(0.1),
-                       max_icp(100),
-                       max_outer(100),
-                       stop(1e-5) {}
+        p(0.1),
+        max_icp(100),
+        max_outer(100),
+        stop(1e-5) {}
         /// Parameters
         Function f;     /// robust function type
         double p;       /// paramter of the robust function
@@ -471,7 +506,7 @@ namespace ICP {
         /// ICP
         for(int icp=0; icp<par.max_icp; ++icp) {
             /// Find closest point
-            #pragma omp parallel for
+#pragma omp parallel for
             for(int i=0; i<X.cols(); ++i) {
                 Q.col(i) = Y.col(kdtree.closest(X.col(i).data()));
             }
@@ -514,7 +549,7 @@ namespace ICP {
         /// ICP
         for(int icp=0; icp<par.max_icp; ++icp) {
             /// Find closest point
-            #pragma omp parallel for
+#pragma omp parallel for
             for(int i=0; i<X.cols(); ++i) {
                 int id = kdtree.closest(X.col(i).data());
                 Qp.col(i) = Y.col(id);
@@ -539,5 +574,8 @@ namespace ICP {
         }
     }
 }
+#pragma clang diagnostic pop
+
 ///////////////////////////////////////////////////////////////////////////////
 #endif
+

@@ -236,6 +236,8 @@ namespace SICP {
         int max_inner = 1;        /// max inner iteration. If max_inner=1 then ADMM else ALM
         double stop = 1e-5;       /// stopping criteria
         bool print_icpn = false;  /// (debug) print ICP iteration
+        
+        double outlierDeviationsThreshold = 1.0f; // The number of standard deviations outside of which a depth value being aligned is coinsidered an outlier
     };
     /// Shrinkage operator (Automatic loop unrolling using template)
     template<unsigned int I>
@@ -335,7 +337,6 @@ namespace SICP {
                         Eigen::MatrixBase<Derived2>& Y,
                         Eigen::MatrixBase<Derived3>& N,
                         Parameters par = Parameters()) {
-        
         Eigen::Affine3d totalTransform;
         totalTransform.setIdentity();
 
@@ -348,9 +349,15 @@ namespace SICP {
         Eigen::VectorXd C = Eigen::VectorXd::Zero(X.cols());
         Eigen::Matrix3Xd Xo1 = X;
         Eigen::Matrix3Xd Xo2 = X;
+        
+        Eigen::VectorXd W = Eigen::VectorXd::Ones(X.cols());
+        Eigen::VectorXd squaredErrors = Eigen::VectorXd::Ones(X.cols());
+        
         /// ICP
         for(int icp=0; icp<par.max_icp; ++icp) {
             if(par.print_icpn) std::cout << "Iteration #" << icp << "/" << par.max_icp << std::endl;
+            
+            double sumSquaredError = 0;
             
             /// Find closest point
 #pragma omp parallel for
@@ -358,7 +365,35 @@ namespace SICP {
                 int id = kdtree.closest(X.col(i).data());
                 Qp.col(i) = Y.col(id);
                 Qn.col(i) = N.col(id);
+              
+                float nearestRefVertexDistanceSquared;
+                {
+                    float x0 = X.col(i).data()[0];
+                    float y0 = X.col(i).data()[1];
+                    float z0 = X.col(i).data()[2];
+                    
+                    
+                    float x1 = Y.col(id).data()[0];
+                    float y1 = Y.col(id).data()[1];
+                    float z1 = Y.col(id).data()[2];
+                    
+                    nearestRefVertexDistanceSquared = (x0 - x1)* (x0 - x1) + (y0 - y1)* (y0 - y1) + (z0 - z1)* (z0 - z1);
+                }
+                squaredErrors(i) = nearestRefVertexDistanceSquared;
+                sumSquaredError += nearestRefVertexDistanceSquared;
             }
+            
+            float avgSquaredError = sumSquaredError / (float)X.cols();
+            float normalizedVarianceThreshold = par.outlierDeviationsThreshold * par.outlierDeviationsThreshold;
+            
+            // calculate correspondence weights.
+            for (size_t i = 0; i < X.cols(); i++) {
+                double squaredError = squaredErrors(i);
+                float normalizedVariance = squaredError / avgSquaredError;
+                float weight = normalizedVariance > normalizedVarianceThreshold ? 0.0 : 1.0;
+                W(i) = weight;
+            }
+            
             /// Computer rotation and translation
             double mu = par.mu;
             for(int outer=0; outer<par.max_outer; ++outer) {
@@ -369,7 +404,7 @@ namespace SICP {
                     shrink<3>(Z, mu, par.p);
                     /// Rotation and translation update
                     Eigen::VectorXd U = Z-C/mu;
-                    Eigen::Affine3d transform = RigidMotionEstimator::point_to_plane(X, Qp, Qn, Eigen::VectorXd::Ones(X.cols()), U);
+                    Eigen::Affine3d transform = RigidMotionEstimator::point_to_plane(X, Qp, Qn, W, U);
                     
                     totalTransform = transform * totalTransform;
                     
@@ -546,6 +581,7 @@ namespace ICP {
         Eigen::VectorXd W = Eigen::VectorXd::Zero(X.cols());
         Eigen::Matrix3Xd Xo1 = X;
         Eigen::Matrix3Xd Xo2 = X;
+        
         /// ICP
         for(int icp=0; icp<par.max_icp; ++icp) {
             /// Find closest point
